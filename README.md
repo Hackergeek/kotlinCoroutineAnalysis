@@ -53,6 +53,8 @@ Dispatchers中提供了4种类型调度器：
 
 所有的调度器都是CoroutineDispatcher的子类
 
+1.CoroutineDispatcher调度器
+
 CoroutineDispatcher继承AbstractCoroutineContextElement，AbstractCoroutineContextElement是Element接口的一个抽象实现类，而Element又实现CoroutineContext接口，所以调度器本身既是一个CoroutineContext，也可以作为CoroutineContext集合的元素存放其中。
 
 CoroutineDispatcher还实现ContinuationInterceptor接口，ContinuationInterceptor 是一个拦截器的接口定义，也是Kotlin协程提供的拦截器的规范。
@@ -62,6 +64,26 @@ CoroutineDispatcher还实现ContinuationInterceptor接口，ContinuationIntercep
 在ContinuationInterceptor中定义了一个伴生对象Key,它的类型是CoroutineContext.Key<Element>，所以Key也是拦截器作为Element元素的索引，Key是一个伴生对象，可以通过类名访问它，则CoroutineContext[ContinuationInterceptor]就可以在集合中获取到拦截器。这里使用伴生对象作为集合元素的索引，一是伴生对象成员全局唯一，另一个通过类名访问集合元素，更直观。
 
 ContinuationInterceptor#interceptContinuation的作用是对协程体类对象continuation做一次包装，并返回了一个新的Continuation对象，而这个新的Continuation对象本质上是代理了原有的协程体类对象continuation。
+
+2.DispatchedContinuation包装
+
+DispatchedContinuation是出现的第二个Continuation对象(第一个是协程体），代理协程体Continuation对象并持有线程调度器，它的作用就是使用线程调度器将协程体调度到指定的线程执行。
+
+DispatchedContinuation 存在两个参数，拦截器dispatcher（在这里就是指的就是线程调度器Dispatcher）另一个参数continuation指协程体类对象；
+
+DispatchedContinuation也实现了Continuation接口，并重写resumeWith()，内部实现逻辑：
+
+1.如果需要线程调度，则调用dispatcher#dispatch进行调度，而dispatch()的第二个参数是一个runnable对象（这里传参为this，即DispatchedContinuation对象本身，DispatchedContinuation同时还实现了Runnable接口），不难猜出，这个runnable就会运行在调度的线程上；
+
+2.不需要调度则直接调用协程体类continuation对象的resumeWith()，前面的章节中提到,协程体的运行就是协程体类Continuation对象的resumeWith()被触发,所以这里就会让协程体在当前线程运行；
+
+另外还有一个方法resumeCancellableWith()，它和resumeWith()的实现很类似，在不同的启动模式下调度线程的方法调用不同。比如默认的启动模式调用resumeCancellableWith()，ATOMIC启动模式则调用resumeWith()。
+
+在这里的dispatcher是抽象对象，具体的调度逻辑，在相应的调度器实现中封装，比如示例中的Dispatchers.Default。
+
+至此，经过拦截器的处理这时候协程体Continuation对象被包装成了带有调度逻辑的DispatchedContinuation对象。
+
+DispatchedContinuation还继承了DispatchedTask类
 
 ## 参考链接
 
