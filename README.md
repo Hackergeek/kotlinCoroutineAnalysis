@@ -1,5 +1,7 @@
 # Kotlin协程原理解析
 
+基于Kotlin源码1.4.3
+
 ## 相关概念
 
 * 协程体：协程中要执行的操作，它是一个被suspend修饰的lambda 表达式;
@@ -84,6 +86,85 @@ DispatchedContinuation也实现了Continuation接口，并重写resumeWith()，�
 至此，经过拦截器的处理这时候协程体Continuation对象被包装成了带有调度逻辑的DispatchedContinuation对象。
 
 DispatchedContinuation还继承了DispatchedTask类
+
+在DispatchedContinuation中，重写了delegate属性并赋值为this，所以在DispatchedTask中，delegate就是DispatchedContinuation。
+
+在run()的逻辑中，通过DispatchedContinuation拿到了原始的协程体类Continuation对象，并通过Continuation的扩展方法resume()触发协程体的resumeWith()，到这里就清楚了，只要让这个runable在指定的的线程运行就实现了线程的调度。而调度器的实现就是将这个这个runable对象再指定的线程运行，这也是dispatcher#dispatch()的作用。
+
+3.Dispatchers.Default默认调度器
+CoroutineScheduler是一个Kotlin封装的线程池,协程运行的线程由coroutineScheduler分配。
+
+在ExperimentalCoroutineDispatcher中找到调度器dispatch()方法的实现，它的实现很简单，调用coroutineScheduler.dispatch()。
+
+调度器的dispatch(CoroutineContext,Runnable)方法声明有两个参数，其中第二个参数Runnable，在分析DispatchedContinuation的章节中提到，传参为DispatchedContinuation自身，这个DispatchedContinuation也作为coroutineScheduler.dispatch()方法的调用参数。
+
+4.Worker线程
+
+CoroutineScheduler是一个Kotlin实现的线程池，提供协程运行的线程。
+
+CoroutineScheduler是一个线程池，它生成的就是线程，Worker就是Kotlin协程的线程，Worker的实现是继承了Thread，本质上还是对java线程的一次封装，另下文中提及的Task实际为一个DispatchedContinuation对象，DispatchedContinuation继承Task；
+
+Worker存在5种状态：
+
+CPU_ACQUIRED 获取到cpu权限
+BLOCKING 正在执行IO阻塞任务
+PARKING 已处理完所有任务，线程挂起
+DORMANT 初始态
+TERMINATED 终止态
+
+Worker继承Thread是一个线程，线程的启动会执行run方法，在Worker的run()中，调用runWorker()，而runWorker()中首先启动了一个有条件的死循环，在线程的状态未被置为TERMINATED终止时，线程一直存活，在循环体中遍历私有和全局任务队列，此时分为两个分支：
+
+1. 如找到Task,则运行该Task
+2. 如未找到判断是否存在可窃取的任务，这里的判断条件是根据minDelayUntilStealableTaskNs来进行的，它的定义就是经过本身值的时间之后，至少存在一个可窃取的任务：
+
+minDelayUntilStealableTaskNs非0时，重新扫描一遍队列，是否已有任务，如依然没有任务，进入下次循环，这次循环将线程阻塞minDelayUntilStealableTaskNs纳秒后唤醒，同时将minDelayUntilStealableTaskNs置为0；
+minDelayUntilStealableTaskNs为0，没有可偷窃的任务，将线程进行挂起，等待唤醒;
+
+查找任务时，首先检查CPU权限，这里存在两种情况：
+1.可以占用cpu权限，这里有一个反饥饿随机数的机制，随机从线程私有队列及全局队列中获取任务，如果获取不到，则通过trySteal(blockingOnly = false)方法，尝试从其它线程获取cpu密集型任务或者IO任务；
+
+globalFirst是一种反饥饿机制，作用就是概率性的从本地队列及全局队列中获取Task，确保内部和外部任务的进度;
+
+2.不能占用cpu权限，这里源码中有一段注释：If we can't acquire a CPU permit -- attempt to find blocking task，在获取不到cpu许可时，尝试找到一个阻塞任务。这里的处理是优先取本地队列任务，未获取到则取全局IO队列，都未获取到，则通过trySteal(blockingOnly = true)方法，尝试从其它线程获取IO任务；
+
+新创建线程存在两个限制条件：
+
+1.非阻塞线程数小于核心线程数量；
+2.已创建的线程数量小于最大线程数量；
+
+当创建好一个线程之后，如果满足非阻塞线程数量为1，同时核心数量总数大于1时，再次创建一个新的线程，用来“偷窃”其它线程的任务，这样做的目的是为了提高效率;
+
+在beforeTask()的处理中，如果当前任务为IO任务，且当前线程占有CPU权限，会对权限进行释放，紧接着会唤醒一个线程，如没有待唤醒的线程，会尝试新建一个线程并启动，IO任务占用的CPU很少，这样做可以让新唤醒或者新建的线程占用cpu的时间片执行其他task;
+
+executeTask()方法执行一个任务，在执行任务前，及任务结束后，都对阻塞型任务做了一些处理，这是因为阻塞的任务开始后不需要或者占用很少cpu的权限，所以当前线程如果占有cpu权限，为了提高资源的利用率，可以释放cpu权限，而且可以通过唤醒或者新建一个线程去占用这个cpu时间片去执行其它的任务，当任务结束后，也将线程的状态重置为初始态;
+
+在CoroutineScheduler#dispatch()中，会将Runbale对象封装成一个Task,如当前线程是一个Worker，优先将task添加至当前线程的任务队列，否则会将任务添加到Global队列中，最后进行线程唤起或者创建新线程执行该任务；
+
+至此，对Kotlin协程中一些核心类进行了分析，对其作用做个总结如下：
+协程体类：封装协程体的操作逻辑。
+Dispatchers ：提供4种线程调度器。
+CoroutineDispatcher ：调度器的父类，CoroutineDispatcher#interceptContinuation()将协程体类对象包装成DispatchedContinuation。
+DispatchedContinuation：代理协程体类对象，并持有线程调度器。
+CoroutineScheduler:线程池，提供协程运行的线程。
+Worker：Worker的实现是继承了Thread，本质上还是对java线程的一次封装。
+
+IO调度器是Dispatchers.Default内的一个变量，并且它和Default调度器共享CoroutineScheduler线程池。
+
+launch函数的返回值是一个Job,通过launch或者async创建的协程都会返回一个Job实例，它的作用是管理协程的生命周期，也作为协程的唯一标志。
+
+Job的状态：
+New: 新建
+Active: 活跃
+Cancelling: 正在取消
+Cancelled: 已取消
+Completing: 完成中
+Completed: 已完成
+
+StandaloneCoroutine具体来说是一个协程对象，继承AbstractCoroutine，并重写了handleJobException()异常处理方法，所有的协程对象都继承AbstractCoroutine。
+AbstractCoroutine继承实现了JobSupport、Job、Continuation、CoroutineScope。
+
+Job实现了CoroutineContext.Element，它是CoroutineContext集合的元素类型，并且Key为Job。Job内提供了isActive、isCompleted、isCancelled属性用以判断协程的状态，以及取消协程、等待协程完成、监听协程状态的操作
+
 
 ## 参考链接
 

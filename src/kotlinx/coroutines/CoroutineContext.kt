@@ -11,6 +11,7 @@ import kotlin.coroutines.jvm.internal.CoroutineStackFrame
 
 internal const val COROUTINES_SCHEDULER_PROPERTY_NAME = "kotlinx.coroutines.scheduler"
 
+// useCoroutinesScheduler读取key为"kotlinx.coroutines.scheduler"的系统属性，默认为"on"，所以useCoroutinesScheduler为true
 internal val useCoroutinesScheduler = systemProp(COROUTINES_SCHEDULER_PROPERTY_NAME).let { value ->
     when (value) {
         null, "", "on" -> true
@@ -19,6 +20,7 @@ internal val useCoroutinesScheduler = systemProp(COROUTINES_SCHEDULER_PROPERTY_N
     }
 }
 
+// 默认情况下useCoroutinesScheduler为true，所以会构建一个DefaultScheduler
 internal actual fun createDefaultDispatcher(): CoroutineDispatcher =
     if (useCoroutinesScheduler) DefaultScheduler else CommonPool
 
@@ -30,13 +32,11 @@ internal actual fun createDefaultDispatcher(): CoroutineDispatcher =
  */
 @ExperimentalCoroutinesApi
 public actual fun CoroutineScope.newCoroutineContext(context: CoroutineContext): CoroutineContext {
-    // 符号“+”对应CoroutineContext的plus方法  
     val combined = coroutineContext + context
     val debug = if (DEBUG) combined + CoroutineId(COROUTINE_ID.incrementAndGet()) else combined
     return if (combined !== Dispatchers.Default && combined[ContinuationInterceptor] == null)
         debug + Dispatchers.Default else debug
 }
-
 
 /**
  * Executes a block using a given coroutine context.
